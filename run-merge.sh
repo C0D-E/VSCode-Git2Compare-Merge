@@ -11,7 +11,7 @@ git commit -m "feat: Add initial version of merged file"
 # --- Step 2: Create a new branch with v2 content ---
 echo ""
 echo "--- Step 2: Creating new branch with v2 content ---"
-git switch -c feature/add-v2-content
+git switch -c add-v2-content
 cp files/v2.md "${MERGED_FILE}"
 git add "${MERGED_FILE}"
 git commit -m "feat: Update merged file with v2 content"
@@ -20,7 +20,7 @@ git commit -m "feat: Update merged file with v2 content"
 echo ""
 echo "--- Step 3: Switching back and merging branches ---"
 git switch main
-git merge feature/add-v2-content
+git merge add-v2-content
 
 # --- Step 4: Formatting and Deduplicating ONLY the Merged File ---
 echo ""
