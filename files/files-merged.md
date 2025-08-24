@@ -1,29 +1,28 @@
-# --- Insert your v1 content here ---
+# GRIDOCS — Roles, RLS, Invitations, Rate-Limiting & RPCs (Production Reference)
 
-# GRIDOCS — Roles, RLS & RPCs (Production Reference)
+_Last updated: 2025-08-23_
 
 ## 1) Role model & “common sense” logic
 
-We’ll use your `roles.level` to gate capabilities. To make it explicit and easy to tune,
-we define three global thresholds (you can change numbers without touching policy text):
+We use `roles.level` to gate capabilities. Thresholds (tunable; change once, policies
+pick it up):
 
-- **Admin**: `level >= 40`
+- **Admin**: `level >= 50`
 - **Developer**: `level >= 60`
-- **Super**: `level >= 90` (absolute access; global override)
+- **Super**: `level >= 90` (absolute/global)
 
-> If your existing `roles` already have levels (e.g., _Locked 0, Limited 5, Demo 10,
-> User 20, Administrator 50_), just adjust the thresholds below or align your levels to
-> these thresholds.
+> If your existing levels differ (e.g., Locked 0, Limited 5, Demo 10, User 20,
+> Administrator 50), adjust the threshold functions below or align role levels.
 
 ### Policy intent (summary)
 
 - **Companies**
   - Read: company members (current) and global Super.
-  - Create/Update/Delete (modify “company info”): **Admin+** (Admin, Developer, Super).
+  - Create/Update/Delete: **Admin+** (Admin, Developer, Super).
 
 - **Users/Profiles**
   - Read: self OR users who share a company OR global Super.
-  - Update: **self** (including signature) OR Admin+ of a company the user belongs to OR
+  - Update: **self** (incl. signature) OR Admin+ of a company the user belongs to OR
     global Super.
   - Delete: global Super only (recommended).
 
@@ -33,81 +32,63 @@ we define three global thresholds (you can change numbers without touching polic
 
 - **Documents**
   - Read: company members OR global Super.
-  - Create/Update/Delete “originals” (`documents` rows): **Admin+** of that company OR
-    global Super.
-  - Versions (`document_versions`): **any company member can `INSERT` a version** (if
-    `uploaded_by = auth.uid()`); Admin+ and Super can also insert; Admin+ and Super can
+  - “Originals” (`documents`) create/update/delete: **company Admin+** or global higher.
+  - `document_versions`: **any company member may INSERT** (if
+    `uploaded_by = auth.uid()`); Admin+/Super may also insert; Admin+/Super may
     update/delete.
 
-- **Product codes** (scoped to company)
+- **Product codes** (company-scoped)
   - Read: company members OR global Super.
   - Write: **Admin+** or global Super.
 
-- **Licenses** (scoped through the product code’s company)
-  - Read: the subject user, members of the owning company, or global Super.
-  - Write: **Developer+ only** (Developer or Super). **Admin and below cannot
-    create/modify licenses** (they can request through your UX/workflow).
+- **Licenses** (scoped via product’s company)
+  - Read: subject user, members of the owning company, or global Super.
+  - Write: **Developer+ only** (Developer or Super). Admin and below **cannot**
+    create/modify licenses (they can request via UX; privileged flow approves).
 
 - **Metadata** (`permissions`, `resources_permissions`, `roles`, `roles_permissions`,
   `statuses`, `address_types`, `role_in_company`)
   - Read: all authenticated.
-  - Write: global Super only (or Developer+ if you prefer—shown as Super-only below).
+  - Write: global Super only (you can loosen to Developer+ if desired).
 
 - **Addresses**
   - Read: owner via `users_addresses`, members via `companies_addresses`, or global
     Super.
-  - User address writes: the user (self) or Admin+ of a company the user belongs to or
-    global Super.
-  - Company address writes: Admin+ of that company or global Super.
+  - User address writes: self or Admin+ of a company the user belongs to, or global
+    Super.
+  - Company address writes: company Admin+ or global Super.
 
 ---
 
 ## 2) “Current license” definition & scope
 
-- **Current license =** `expires_at >= now()` (strict)
-  - **`NULL` is _not_ current**.
-  - If you want “no expiration” licenses, store `expires_at = 'infinity'::timestamptz`,
-    which **is** current because `infinity >= now()` is true. (Explanation in §4)
-
-- **Scope by product**: the function **requires `p_product_code`**. This avoids
-  ambiguities when a user may have multiple licenses for different products.
+- **Current**: `expires_at >= now()` (strict).
+- **`NULL` is _not_ current**.
+- “No expiration” → **`'infinity'::timestamptz`**, which satisfies `>= now()`.
+- **Scope by product**: functions require `p_product_code`.
 
 ---
 
-## 3) SQL — Helpers, RLS, and RPCs (ready to run)
+## 3) SQL — Schema, RLS, Helpers, RPCs (ready-to-run)
 
-> **Run this whole block** (adjust thresholds or lists if needed). All functions are
-> `SECURITY INVOKER` unless noted; RLS stays in force.
+> Run this full block. It’s idempotent where possible. SECURITY DEFINER functions
+> include GRANTs.
 
 ```sql
--- =========================================================
--- gridocs RLS & helper functions
--- Generated: 2025-08-23 (tailored to your rules)
--- =========================================================
-
 set search_path = gridocs, public;
 
--- -----------------------------
--- Global thresholds (tunable)
--- -----------------------------
+-- =========================================================
+-- THRESHOLDS & ROLE/MEMBERSHIP HELPERS
+-- =========================================================
 create or replace function gridocs.admin_level_threshold()
-returns int language sql stable as $$
-  select 40;
-$$;
+returns int language sql stable as $$ select 50; $$;
 
 create or replace function gridocs.developer_level_threshold()
-returns int language sql stable as $$
-  select 60;
-$$;
+returns int language sql stable as $$ select 60; $$;
 
 create or replace function gridocs.super_level_threshold()
-returns int language sql stable as $$
-  select 90;
-$$;
+returns int language sql stable as $$ select 90; $$;
 
--- -----------------------------
--- Role helpers
--- -----------------------------
 create or replace function gridocs.get_user_max_role_level(p_user_id uuid)
 returns int language sql stable security invoker set search_path = gridocs, public as $$
   select coalesce(max(r.level)::int, 0)
@@ -131,9 +112,6 @@ returns boolean language sql stable security invoker set search_path = gridocs, 
   select gridocs.get_user_max_role_level(p_user_id) >= gridocs.admin_level_threshold();
 $$;
 
--- -----------------------------
--- Membership helpers
--- -----------------------------
 create or replace function gridocs.is_company_member(p_company_id uuid, p_user_id uuid)
 returns boolean language sql stable security invoker set search_path = gridocs, public as $$
   select exists (
@@ -156,160 +134,312 @@ returns boolean language sql stable security invoker set search_path = gridocs, 
      and gridocs.get_user_max_role_level(p_user_id) >= gridocs.developer_level_threshold();
 $$;
 
--- Helpers to resolve scope (optional)
-create or replace function gridocs.company_id_for_product_code(p_product_code_id uuid)
+-- Role-in-company helpers
+create or replace function gridocs.get_role_in_company_id_by_name(p_name text)
 returns uuid language sql stable security invoker set search_path = gridocs, public as $$
-  select pc.company_id from gridocs.product_codes pc where pc.id = p_product_code_id;
+  select id from gridocs.role_in_company where name = p_name limit 1;
 $$;
 
-create or replace function gridocs.company_id_for_document(p_document_id uuid)
+create or replace function gridocs.default_member_role()
 returns uuid language sql stable security invoker set search_path = gridocs, public as $$
-  select d.company_id from gridocs.documents d where d.id = p_document_id;
+  select id from gridocs.role_in_company where name ilike 'member' limit 1;
 $$;
 
--- ---------------------------------
--- Enable RLS on relevant tables
--- ---------------------------------
-alter table if exists gridocs.companies enable row level security;
-alter table if exists gridocs.users_companies enable row level security;
-alter table if exists gridocs.profiles enable row level security;
-alter table if exists gridocs.documents enable row level security;
-alter table if exists gridocs.document_versions enable row level security;
-alter table if exists gridocs.product_codes enable row level security;
-alter table if exists gridocs.addresses enable row level security;
-alter table if exists gridocs.address_types enable row level security;
-alter table if exists gridocs.companies_addresses enable row level security;
-alter table if exists gridocs.users_addresses enable row level security;
-alter table if exists gridocs.licenses enable row level security;
-alter table if exists gridocs.permissions enable row level security;
-alter table if exists gridocs.resources_permissions enable row level security;
-alter table if exists gridocs.roles enable row level security;
-alter table if exists gridocs.roles_permissions enable row level security;
-alter table if exists gridocs.statuses enable row level security;
-alter table if exists gridocs.role_in_company enable row level security;
+-- Membership QoL helpers
+create or replace function gridocs.ensure_membership(
+  p_user_id uuid,
+  p_company_id uuid,
+  p_role_in_company uuid default null
+) returns gridocs.users_companies
+language plpgsql security invoker set search_path = gridocs, public as $$
+declare v_row gridocs.users_companies%rowtype; v_exists boolean; v_role uuid;
+begin
+  v_role := coalesce(p_role_in_company, gridocs.default_member_role());
+  select exists(
+    select 1 from gridocs.users_companies
+     where user_id = p_user_id and company_id = p_company_id and end_date is null
+  ) into v_exists;
 
--- =========================================
--- RLS: companies
--- =========================================
+  if v_exists then
+    update gridocs.users_companies
+       set role_in_company = coalesce(v_role, role_in_company)
+     where user_id = p_user_id and company_id = p_company_id and end_date is null
+     returning * into v_row;
+  else
+    insert into gridocs.users_companies(id, user_id, company_id, role_in_company, start_date)
+    values (gen_random_uuid(), p_user_id, p_company_id, v_role, current_date)
+    returning * into v_row;
+  end if;
+  return v_row;
+end;
+$$;
+
+create or replace function gridocs.end_membership(
+  p_user_id uuid,
+  p_company_id uuid,
+  p_end_date date default current_date
+) returns gridocs.users_companies
+language sql security invoker set search_path = gridocs, public as $$
+  update gridocs.users_companies
+     set end_date = coalesce(p_end_date, current_date)
+   where user_id = p_user_id and company_id = p_company_id and end_date is null
+   returning *;
+$$;
+
+-- =========================================================
+-- INVITATIONS (scalable; no legacy company column)
+-- =========================================================
+-- ================================
+-- Drop tables if they exist
+-- ================================
+drop table if exists gridocs.invite_attempts cascade;
+drop table if exists gridocs.invitations cascade;
+
+-- ================================
+-- Unique Code Generator (uses dynamic SQL)
+-- ================================
+drop function if exists gridocs.generate_invitation_code();
+create or replace function gridocs.generate_invitation_code()
+returns text
+language plpgsql
+volatile
+as $$
+declare
+  alphabet constant text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  raw text := '';
+  v_code text;
+  i int;
+  exists_code boolean;
+begin
+  loop
+    raw := '';
+    for i in 1..8 loop
+      raw := raw || substr(alphabet, 1 + floor(random() * length(alphabet))::int, 1);
+    end loop;
+
+    v_code := substr(raw, 1, 4) || '-' || substr(raw, 5, 4);
+
+    -- ensure uniqueness using dynamic SQL (avoids early validation)
+    execute format(
+      'select exists (select 1 from gridocs.invitations where code = %L)',
+      v_code
+    ) into exists_code;
+
+    exit when not exists_code;
+  end loop;
+
+  return v_code;
+end;
+$$;
+
+-- ================================
+-- Create Invitations Table
+-- ================================
+create table gridocs.invitations (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references gridocs.companies(id) on delete cascade,
+  code text not null default gridocs.generate_invitation_code(),
+  role_in_company uuid null references gridocs.role_in_company(id) on delete set null,
+  max_uses int not null default 1,
+  used_count int not null default 0,
+  expires_at timestamptz null,
+  is_disabled boolean not null default false,
+  created_by uuid null references gridocs.profiles(id) on delete set null,
+  created_at timestamptz not null default now(),
+  constraint invitations_code_format
+    check (code ~ '^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$'),
+  constraint invitations_used_le_max check (used_count <= max_uses)
+);
+
+-- ================================
+-- Indexes for Invitations
+-- ================================
+create unique index ux_invitations_code on gridocs.invitations(code);
+create index idx_invitations_company on gridocs.invitations(company_id);
+create index idx_invitations_expires_at on gridocs.invitations(expires_at);
+
+-- ================================
+-- Create Invite Attempts Table
+-- ================================
+create table gridocs.invite_attempts (
+  id uuid primary key default gen_random_uuid(),
+  invite_code text null,
+  actor_user_id uuid null,
+  actor_ip inet null,
+  action text not null check (action in ('validate','join')),
+  created_at timestamptz not null default now()
+);
+
+-- ================================
+-- Indexes for Invite Attempts
+-- ================================
+create index idx_invite_attempts_code on gridocs.invite_attempts(invite_code);
+create index idx_invite_attempts_actor on gridocs.invite_attempts(actor_user_id);
+create index idx_invite_attempts_ip on gridocs.invite_attempts(actor_ip);
+create index idx_invite_attempts_action_time on gridocs.invite_attempts(action, created_at);
+
+-- ================================
+-- Trigger Function for Invitations
+-- ================================
+drop function if exists gridocs.trg_invitations_code();
+create or replace function gridocs.trg_invitations_code()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.code is null then
+    new.code := gridocs.generate_invitation_code();
+  end if;
+
+  new.code := upper(new.code);
+  return new;
+end;
+$$;
+
+drop trigger if exists invitations_code on gridocs.invitations;
+create trigger invitations_code
+  before insert or update on gridocs.invitations
+  for each row
+  execute function gridocs.trg_invitations_code();
+
+-- ================================
+-- Rate-limit Helper Function
+-- ================================
+drop function if exists gridocs.under_rate_limit(p_action text, p_actor_ip inet, p_actor_user_id uuid, p_limit_ip int, p_limit_user int, p_window interval);
+create or replace function gridocs.under_rate_limit(
+  p_action text,
+  p_actor_ip inet,
+  p_actor_user_id uuid,
+  p_limit_ip int,
+  p_limit_user int,
+  p_window interval
+) returns boolean
+language sql
+security invoker
+stable
+set search_path = gridocs, public
+as $$
+  with ip_count as (
+    select count(*) cnt
+    from gridocs.invite_attempts
+    where action = p_action
+      and actor_ip = p_actor_ip
+      and created_at >= now() - p_window
+  ),
+  user_count as (
+    select count(*) cnt
+    from gridocs.invite_attempts
+    where action = p_action
+      and actor_user_id = p_actor_user_id
+      and created_at >= now() - p_window
+  )
+  select
+    (coalesce((select cnt from ip_count),0) < coalesce(p_limit_ip, 2147483647))
+    and
+    (coalesce((select cnt from user_count),0) < coalesce(p_limit_user, 2147483647));
+$$;
+
+-- =========================================================
+-- ENABLE RLS
+-- =========================================================
+alter table gridocs.companies enable row level security;
+alter table gridocs.users_companies enable row level security;
+alter table gridocs.profiles enable row level security;
+alter table gridocs.documents enable row level security;
+alter table gridocs.document_versions enable row level security;
+alter table gridocs.product_codes enable row level security;
+alter table gridocs.addresses enable row level security;
+alter table gridocs.address_types enable row level security;
+alter table gridocs.companies_addresses enable row level security;
+alter table gridocs.users_addresses enable row level security;
+alter table gridocs.licenses enable row level security;
+alter table gridocs.permissions enable row level security;
+alter table gridocs.resources_permissions enable row level security;
+alter table gridocs.roles enable row level security;
+alter table gridocs.roles_permissions enable row level security;
+alter table gridocs.statuses enable row level security;
+alter table gridocs.role_in_company enable row level security;
+alter table gridocs.invitations enable row level security;
+alter table gridocs.invite_attempts enable row level security;
+
+-- =========================================================
+-- RLS POLICIES (core + invitations)
+-- =========================================================
+
+-- Companies
 drop policy if exists companies_sel on gridocs.companies;
 create policy companies_sel on gridocs.companies
-  for select
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_member(id, auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for select using (
+    auth.uid() is not null
+    and (gridocs.is_company_member(id, auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- Create company: Admin+ (Admin, Dev, Super)
 drop policy if exists companies_ins on gridocs.companies;
 create policy companies_ins on gridocs.companies
-  for insert
-  with check (
-    auth.uid() is not null and (
-      gridocs.is_global_admin(auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for insert with check (
+    auth.uid() is not null
+    and (gridocs.is_global_admin(auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- Update/Delete company info: Admin+ (Admin, Dev, Super)
 drop policy if exists companies_upd on gridocs.companies;
 create policy companies_upd on gridocs.companies
-  for update
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for update using (
+    auth.uid() is not null
+    and (gridocs.is_company_admin(id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   )
   with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+    auth.uid() is not null
+    and (gridocs.is_company_admin(id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists companies_del on gridocs.companies;
 create policy companies_del on gridocs.companies
-  for delete
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for delete using (
+    auth.uid() is not null
+    and (gridocs.is_company_admin(id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- =========================================
--- RLS: users_companies
--- =========================================
+-- Users_Companies
 drop policy if exists users_companies_sel on gridocs.users_companies;
 create policy users_companies_sel on gridocs.users_companies
-  for select
-  using (
-    auth.uid() is not null and (
-      user_id = auth.uid()
-      or gridocs.is_company_member(company_id, auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for select using (
+    auth.uid() is not null
+    and (user_id = auth.uid() or gridocs.is_company_member(company_id, auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- Write: Admin+ of that company or Super
 drop policy if exists users_companies_ins on gridocs.users_companies;
 create policy users_companies_ins on gridocs.users_companies
-  for insert
-  with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for insert with check (
+    auth.uid() is not null
+    and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists users_companies_upd on gridocs.users_companies;
 create policy users_companies_upd on gridocs.users_companies
-  for update
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for update using (
+    auth.uid() is not null
+    and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   )
   with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+    auth.uid() is not null
+    and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists users_companies_del on gridocs.users_companies;
 create policy users_companies_del on gridocs.users_companies
-  for delete
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for delete using (
+    auth.uid() is not null
+    and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- =========================================
--- RLS: profiles
--- =========================================
+-- Profiles
 drop policy if exists profiles_sel on gridocs.profiles;
 create policy profiles_sel on gridocs.profiles
-  for select
-  using (
+  for select using (
     auth.uid() is not null and (
       id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies me
+        select 1 from gridocs.users_companies me
         join gridocs.users_companies them
           on them.company_id = me.company_id and them.user_id = gridocs.profiles.id
         where me.user_id = auth.uid() and me.end_date is null
@@ -318,26 +448,18 @@ create policy profiles_sel on gridocs.profiles
     )
   );
 
--- Insert: self or Super (usually handled by sign-up pipeline)
 drop policy if exists profiles_ins on gridocs.profiles;
 create policy profiles_ins on gridocs.profiles
-  for insert
-  with check (
-    auth.uid() is not null and (id = auth.uid() or gridocs.is_global_super(auth.uid()))
-  );
+  for insert with check (auth.uid() is not null and (id = auth.uid() or gridocs.is_global_super(auth.uid())));
 
--- Update: self (including signature) OR Admin+ of a company the user belongs to OR Super
 drop policy if exists profiles_upd on gridocs.profiles;
 create policy profiles_upd on gridocs.profiles
-  for update
-  using (
+  for update using (
     auth.uid() is not null and (
       id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies uc
-        where uc.user_id = gridocs.profiles.id
-          and gridocs.is_company_admin(uc.company_id, auth.uid())
+        select 1 from gridocs.users_companies uc
+        where uc.user_id = gridocs.profiles.id and gridocs.is_company_admin(uc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
@@ -347,96 +469,56 @@ create policy profiles_upd on gridocs.profiles
     auth.uid() is not null and (
       id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies uc
-        where uc.user_id = gridocs.profiles.id
-          and gridocs.is_company_admin(uc.company_id, auth.uid())
+        select 1 from gridocs.users_companies uc
+        where uc.user_id = gridocs.profiles.id and gridocs.is_company_admin(uc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
     )
   );
 
--- Delete: Super only
 drop policy if exists profiles_del on gridocs.profiles;
 create policy profiles_del on gridocs.profiles
-  for delete
-  using (
-    auth.uid() is not null and gridocs.is_global_super(auth.uid())
-  );
+  for delete using (auth.uid() is not null and gridocs.is_global_super(auth.uid()));
 
--- =========================================
--- RLS: documents
--- =========================================
+-- Documents
 drop policy if exists documents_sel on gridocs.documents;
 create policy documents_sel on gridocs.documents
-  for select
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_member(company_id, auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for select using (
+    auth.uid() is not null and (gridocs.is_company_member(company_id, auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- Originals: Admin+ of that company (or global higher) can insert/update/delete
 drop policy if exists documents_ins on gridocs.documents;
 create policy documents_ins on gridocs.documents
-  for insert
-  with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for insert with check (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists documents_upd on gridocs.documents;
 create policy documents_upd on gridocs.documents
-  for update
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for update using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   )
   with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists documents_del on gridocs.documents;
 create policy documents_del on gridocs.documents
-  for delete
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for delete using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- =========================================
--- RLS: document_versions
--- =========================================
+-- Document versions
 drop policy if exists document_versions_sel on gridocs.document_versions;
 create policy document_versions_sel on gridocs.document_versions
-  for select
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_member(company_id, auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for select using (
+    auth.uid() is not null and (gridocs.is_company_member(company_id, auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- Any member can insert a version (if uploader = self); Admin+ and up can also insert
 drop policy if exists document_versions_ins on gridocs.document_versions;
 create policy document_versions_ins on gridocs.document_versions
-  for insert
-  with check (
+  for insert with check (
     auth.uid() is not null and (
       (uploaded_by = auth.uid() and gridocs.is_company_member(company_id, auth.uid()))
       or gridocs.is_company_admin(company_id, auth.uid())
@@ -445,217 +527,121 @@ create policy document_versions_ins on gridocs.document_versions
     )
   );
 
--- Update/Delete versions: Admin+ or higher
 drop policy if exists document_versions_upd on gridocs.document_versions;
 create policy document_versions_upd on gridocs.document_versions
-  for update
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for update using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   )
   with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists document_versions_del on gridocs.document_versions;
 create policy document_versions_del on gridocs.document_versions
-  for delete
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for delete using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- =========================================
--- RLS: product_codes
--- =========================================
+-- Product codes
 drop policy if exists product_codes_sel on gridocs.product_codes;
 create policy product_codes_sel on gridocs.product_codes
-  for select
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_member(company_id, auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for select using (
+    auth.uid() is not null and (gridocs.is_company_member(company_id, auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists product_codes_ins on gridocs.product_codes;
 create policy product_codes_ins on gridocs.product_codes
-  for insert
-  with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for insert with check (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists product_codes_upd on gridocs.product_codes;
 create policy product_codes_upd on gridocs.product_codes
-  for update
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for update using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   )
   with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists product_codes_del on gridocs.product_codes;
 create policy product_codes_del on gridocs.product_codes
-  for delete
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for delete using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
--- =========================================
--- RLS: addresses & joins
--- =========================================
+-- Addresses & joins
 drop policy if exists addresses_sel on gridocs.addresses;
 create policy addresses_sel on gridocs.addresses
-  for select
-  using (
+  for select using (
     auth.uid() is not null and (
-      exists (
-        select 1 from gridocs.users_addresses ua
-        where ua.address_id = gridocs.addresses.id and ua.user_id = auth.uid()
-      )
-      or exists (
-        select 1 from gridocs.companies_addresses ca
-        where ca.address_id = gridocs.addresses.id
-          and gridocs.is_company_member(ca.company_id, auth.uid())
-      )
+      exists (select 1 from gridocs.users_addresses ua where ua.address_id = gridocs.addresses.id and ua.user_id = auth.uid())
+      or exists (select 1 from gridocs.companies_addresses ca where ca.address_id = gridocs.addresses.id and gridocs.is_company_member(ca.company_id, auth.uid()))
       or gridocs.is_global_super(auth.uid())
     )
   );
 
--- Insert raw addresses: Super only (avoid orphans)
 drop policy if exists addresses_ins on gridocs.addresses;
 create policy addresses_ins on gridocs.addresses
-  for insert
-  with check (auth.uid() is not null and gridocs.is_global_super(auth.uid()));
+  for insert with check (auth.uid() is not null and gridocs.is_global_super(auth.uid()));
 
--- Update/Delete address: self-owned via user join OR Admin+ via company join, or Super
 drop policy if exists addresses_upd on gridocs.addresses;
 create policy addresses_upd on gridocs.addresses
-  for update
-  using (
+  for update using (
     auth.uid() is not null and (
       gridocs.is_global_super(auth.uid())
-      or exists (
-        select 1 from gridocs.users_addresses ua
-        where ua.address_id = gridocs.addresses.id and ua.user_id = auth.uid()
-      )
-      or exists (
-        select 1 from gridocs.companies_addresses ca
-        where ca.address_id = gridocs.addresses.id
-          and gridocs.is_company_admin(ca.company_id, auth.uid())
-      )
+      or exists (select 1 from gridocs.users_addresses ua where ua.address_id = gridocs.addresses.id and ua.user_id = auth.uid())
+      or exists (select 1 from gridocs.companies_addresses ca where ca.address_id = gridocs.addresses.id and gridocs.is_company_admin(ca.company_id, auth.uid()))
     )
   )
   with check (
     auth.uid() is not null and (
       gridocs.is_global_super(auth.uid())
-      or exists (
-        select 1 from gridocs.users_addresses ua
-        where ua.address_id = gridocs.addresses.id and ua.user_id = auth.uid()
-      )
-      or exists (
-        select 1 from gridocs.companies_addresses ca
-        where ca.address_id = gridocs.addresses.id
-          and gridocs.is_company_admin(ca.company_id, auth.uid())
-      )
+      or exists (select 1 from gridocs.users_addresses ua where ua.address_id = gridocs.addresses.id and ua.user_id = auth.uid())
+      or exists (select 1 from gridocs.companies_addresses ca where ca.address_id = gridocs.addresses.id and gridocs.is_company_admin(ca.company_id, auth.uid()))
     )
   );
 
 drop policy if exists addresses_del on gridocs.addresses;
 create policy addresses_del on gridocs.addresses
-  for delete
-  using (
-    auth.uid() is not null and gridocs.is_global_super(auth.uid())
-  );
+  for delete using (auth.uid() is not null and gridocs.is_global_super(auth.uid()));
 
 -- companies_addresses
 drop policy if exists companies_addresses_sel on gridocs.companies_addresses;
 create policy companies_addresses_sel on gridocs.companies_addresses
-  for select
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_member(company_id, auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for select using (
+    auth.uid() is not null and (gridocs.is_company_member(company_id, auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists companies_addresses_ins on gridocs.companies_addresses;
 create policy companies_addresses_ins on gridocs.companies_addresses
-  for insert
-  with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for insert with check (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists companies_addresses_mut on gridocs.companies_addresses;
 create policy companies_addresses_mut on gridocs.companies_addresses
-  for update
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for update using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   )
   with check (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 drop policy if exists companies_addresses_del on gridocs.companies_addresses;
 create policy companies_addresses_del on gridocs.companies_addresses
-  for delete
-  using (
-    auth.uid() is not null and (
-      gridocs.is_company_admin(company_id, auth.uid())
-      or gridocs.is_global_developer(auth.uid())
-      or gridocs.is_global_super(auth.uid())
-    )
+  for delete using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
   );
 
 -- users_addresses
 drop policy if exists users_addresses_sel on gridocs.users_addresses;
 create policy users_addresses_sel on gridocs.users_addresses
-  for select
-  using (
+  for select using (
     auth.uid() is not null and (
       user_id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies me
+        select 1 from gridocs.users_companies me
         join gridocs.users_companies them
           on them.company_id = me.company_id and them.user_id = gridocs.users_addresses.user_id
         where me.user_id = auth.uid() and me.end_date is null
@@ -666,15 +652,12 @@ create policy users_addresses_sel on gridocs.users_addresses
 
 drop policy if exists users_addresses_ins on gridocs.users_addresses;
 create policy users_addresses_ins on gridocs.users_addresses
-  for insert
-  with check (
+  for insert with check (
     auth.uid() is not null and (
       user_id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies uc
-        where uc.user_id = gridocs.users_addresses.user_id
-          and gridocs.is_company_admin(uc.company_id, auth.uid())
+        select 1 from gridocs.users_companies uc
+        where uc.user_id = gridocs.users_addresses.user_id and gridocs.is_company_admin(uc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
@@ -683,15 +666,12 @@ create policy users_addresses_ins on gridocs.users_addresses
 
 drop policy if exists users_addresses_mut on gridocs.users_addresses;
 create policy users_addresses_mut on gridocs.users_addresses
-  for update
-  using (
+  for update using (
     auth.uid() is not null and (
       user_id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies uc
-        where uc.user_id = gridocs.users_addresses.user_id
-          and gridocs.is_company_admin(uc.company_id, auth.uid())
+        select 1 from gridocs.users_companies uc
+        where uc.user_id = gridocs.users_addresses.user_id and gridocs.is_company_admin(uc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
@@ -701,10 +681,8 @@ create policy users_addresses_mut on gridocs.users_addresses
     auth.uid() is not null and (
       user_id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies uc
-        where uc.user_id = gridocs.users_addresses.user_id
-          and gridocs.is_company_admin(uc.company_id, auth.uid())
+        select 1 from gridocs.users_companies uc
+        where uc.user_id = gridocs.users_addresses.user_id and gridocs.is_company_admin(uc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
@@ -713,68 +691,52 @@ create policy users_addresses_mut on gridocs.users_addresses
 
 drop policy if exists users_addresses_del on gridocs.users_addresses;
 create policy users_addresses_del on gridocs.users_addresses
-  for delete
-  using (
+  for delete using (
     auth.uid() is not null and (
       user_id = auth.uid()
       or exists (
-        select 1
-        from gridocs.users_companies uc
-        where uc.user_id = gridocs.users_addresses.user_id
-          and gridocs.is_company_admin(uc.company_id, auth.uid())
+        select 1 from gridocs.users_companies uc
+        where uc.user_id = gridocs.users_addresses.user_id and gridocs.is_company_admin(uc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
     )
   );
 
--- =========================================
--- RLS: licenses  (Developer+ only for writes)
--- =========================================
+-- Licenses
 drop policy if exists licenses_sel on gridocs.licenses;
 create policy licenses_sel on gridocs.licenses
-  for select
-  using (
+  for select using (
     auth.uid() is not null and (
       user_id = auth.uid()
       or exists (
-        select 1
-        from gridocs.product_codes pc
-        where pc.id = gridocs.licenses.product_code_id
-          and gridocs.is_company_member(pc.company_id, auth.uid())
+        select 1 from gridocs.product_codes pc
+        where pc.id = gridocs.licenses.product_code_id and gridocs.is_company_member(pc.company_id, auth.uid())
       )
       or gridocs.is_global_super(auth.uid())
     )
   );
 
--- INSERT: Developer+ of product's company or global Super
 drop policy if exists licenses_ins on gridocs.licenses;
 create policy licenses_ins on gridocs.licenses
-  for insert
-  with check (
+  for insert with check (
     auth.uid() is not null and (
       exists (
-        select 1
-        from gridocs.product_codes pc
-        where pc.id = gridocs.licenses.product_code_id
-          and gridocs.is_company_developer(pc.company_id, auth.uid())
+        select 1 from gridocs.product_codes pc
+        where pc.id = gridocs.licenses.product_code_id and gridocs.is_company_developer(pc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
     )
   );
 
--- UPDATE/DELETE: Developer+ only
 drop policy if exists licenses_upd on gridocs.licenses;
 create policy licenses_upd on gridocs.licenses
-  for update
-  using (
+  for update using (
     auth.uid() is not null and (
       exists (
-        select 1
-        from gridocs.product_codes pc
-        where pc.id = gridocs.licenses.product_code_id
-          and gridocs.is_company_developer(pc.company_id, auth.uid())
+        select 1 from gridocs.product_codes pc
+        where pc.id = gridocs.licenses.product_code_id and gridocs.is_company_developer(pc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
@@ -783,10 +745,8 @@ create policy licenses_upd on gridocs.licenses
   with check (
     auth.uid() is not null and (
       exists (
-        select 1
-        from gridocs.product_codes pc
-        where pc.id = gridocs.licenses.product_code_id
-          and gridocs.is_company_developer(pc.company_id, auth.uid())
+        select 1 from gridocs.product_codes pc
+        where pc.id = gridocs.licenses.product_code_id and gridocs.is_company_developer(pc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
@@ -795,83 +755,237 @@ create policy licenses_upd on gridocs.licenses
 
 drop policy if exists licenses_del on gridocs.licenses;
 create policy licenses_del on gridocs.licenses
-  for delete
-  using (
+  for delete using (
     auth.uid() is not null and (
       exists (
-        select 1
-        from gridocs.product_codes pc
-        where pc.id = gridocs.licenses.product_code_id
-          and gridocs.is_company_developer(pc.company_id, auth.uid())
+        select 1 from gridocs.product_codes pc
+        where pc.id = gridocs.licenses.product_code_id and gridocs.is_company_developer(pc.company_id, auth.uid())
       )
       or gridocs.is_global_developer(auth.uid())
       or gridocs.is_global_super(auth.uid())
     )
   );
 
--- =========================================
--- RLS: metadata tables (read auth'd; write Super)
--- =========================================
+-- Metadata (read-only except Super)
 do $$ begin
-  -- permissions
   drop policy if exists permissions_sel on gridocs.permissions;
   create policy permissions_sel on gridocs.permissions for select using (auth.uid() is not null);
   drop policy if exists permissions_mut on gridocs.permissions;
   create policy permissions_mut on gridocs.permissions for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 
-  -- resources_permissions
   drop policy if exists resources_permissions_sel on gridocs.resources_permissions;
   create policy resources_permissions_sel on gridocs.resources_permissions for select using (auth.uid() is not null);
   drop policy if exists resources_permissions_mut on gridocs.resources_permissions;
   create policy resources_permissions_mut on gridocs.resources_permissions for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 
-  -- roles
   drop policy if exists roles_sel on gridocs.roles;
   create policy roles_sel on gridocs.roles for select using (auth.uid() is not null);
   drop policy if exists roles_mut on gridocs.roles;
   create policy roles_mut on gridocs.roles for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 
-  -- roles_permissions
   drop policy if exists roles_permissions_sel on gridocs.roles_permissions;
   create policy roles_permissions_sel on gridocs.roles_permissions for select using (auth.uid() is not null);
   drop policy if exists roles_permissions_mut on gridocs.roles_permissions;
   create policy roles_permissions_mut on gridocs.roles_permissions for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 
-  -- statuses
   drop policy if exists statuses_sel on gridocs.statuses;
   create policy statuses_sel on gridocs.statuses for select using (auth.uid() is not null);
   drop policy if exists statuses_mut on gridocs.statuses;
   create policy statuses_mut on gridocs.statuses for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 
-  -- address_types
   drop policy if exists address_types_sel on gridocs.address_types;
   create policy address_types_sel on gridocs.address_types for select using (auth.uid() is not null);
   drop policy if exists address_types_mut on gridocs.address_types;
   create policy address_types_mut on gridocs.address_types for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 
-  -- role_in_company
   drop policy if exists role_in_company_sel on gridocs.role_in_company;
   create policy role_in_company_sel on gridocs.role_in_company for select using (auth.uid() is not null);
   drop policy if exists role_in_company_mut on gridocs.role_in_company;
   create policy role_in_company_mut on gridocs.role_in_company for all using (gridocs.is_global_super(auth.uid())) with check (gridocs.is_global_super(auth.uid()));
 end $$;
 
+-- Invite tables RLS
+drop policy if exists invitations_sel on gridocs.invitations;
+create policy invitations_sel on gridocs.invitations
+  for select using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
+  );
+
+drop policy if exists invitations_ins on gridocs.invitations;
+create policy invitations_ins on gridocs.invitations
+  for insert with check (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
+  );
+
+drop policy if exists invitations_upd on gridocs.invitations;
+create policy invitations_upd on gridocs.invitations
+  for update using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
+  )
+  with check (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
+  );
+
+drop policy if exists invitations_del on gridocs.invitations;
+create policy invitations_del on gridocs.invitations
+  for delete using (
+    auth.uid() is not null and (gridocs.is_company_admin(company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
+  );
+
+-- Invite attempts are fully hidden (write via definer RPCs only)
+drop policy if exists invite_attempts_sel on gridocs.invite_attempts;
+create policy invite_attempts_sel on gridocs.invite_attempts for select using (false);
+drop policy if exists invite_attempts_mut on gridocs.invite_attempts;
+create policy invite_attempts_mut on gridocs.invite_attempts for all using (false) with check (false);
+
 -- =========================================================
--- RPCs (including "current license" requiring product_code)
+-- RPCs (INVITATIONS, PROFILE, COMPANY, LICENSES, PROMOTION)
 -- =========================================================
 
--- Status id by name (to avoid .from('statuses'))
+-- Create invitation (company Admin+)
+create or replace function gridocs.create_invitation(
+  p_company_id uuid,
+  p_role_in_company uuid default null,
+  p_max_uses int default 1,
+  p_expires_at timestamptz default null
+) returns gridocs.invitations
+language plpgsql security invoker set search_path = gridocs, public as $$
+declare v_code text; v_row gridocs.invitations%rowtype;
+begin
+  if not (gridocs.is_company_admin(p_company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid())) then
+    raise exception 'Not authorized to create invitation for this company';
+  end if;
+
+  if p_max_uses is null or p_max_uses < 1 then
+    raise exception 'max_uses must be >= 1';
+  end if;
+
+  v_code := gridocs.generate_invitation_code();
+  insert into gridocs.invitations(company_id, code, role_in_company, max_uses, expires_at, created_by)
+  values (p_company_id, v_code, p_role_in_company, p_max_uses, p_expires_at, auth.uid())
+  returning * into v_row;
+  return v_row;
+end;
+$$;
+
+-- Validate invitation (rate-limited) — SECURITY DEFINER
+create or replace function gridocs.validate_invitation(
+  p_code text,
+  p_client_ip inet,
+  p_validate_limit_ip int default 20,
+  p_validate_limit_user int default 50,
+  p_validate_window interval default '5 minutes'
+) returns table(
+  invitation_id uuid,
+  company_id uuid,
+  role_in_company uuid,
+  max_uses int,
+  used_count int,
+  expires_at timestamptz,
+  is_disabled boolean
+)
+language plpgsql security definer set search_path = gridocs, public as $$
+declare v_uid uuid := auth.uid(); v_ok boolean;
+begin
+  v_ok := gridocs.under_rate_limit('validate', p_client_ip, v_uid, p_validate_limit_ip, p_validate_limit_user, p_validate_window);
+  insert into gridocs.invite_attempts(invite_code, actor_user_id, actor_ip, action) values (upper(p_code), v_uid, p_client_ip, 'validate');
+  if not v_ok then
+    raise exception 'Too many validation attempts. Please try again later.';
+  end if;
+
+  return query
+    select i.id, i.company_id, i.role_in_company, i.max_uses, i.used_count, i.expires_at, i.is_disabled
+    from gridocs.invitations i
+    where i.code = upper(p_code)
+      and (i.expires_at is null or i.expires_at >= now())
+      and i.is_disabled = false
+      and i.used_count < i.max_uses
+    limit 1;
+end;
+$$;
+
+-- Accept invitation and join (rate-limited; atomic counters) — SECURITY DEFINER
+create or replace function gridocs.accept_invitation_and_join_company(
+  p_code text,
+  p_client_ip inet,
+  p_join_limit_ip int default 10,
+  p_join_limit_user int default 5,
+  p_join_window interval default '1 hour',
+  p_fallback_role_name text default 'Member'
+) returns table(
+  company_id uuid,
+  joined boolean,
+  role_in_company uuid
+)
+language plpgsql security definer set search_path = gridocs, public as $$
+declare
+  v_uid uuid := auth.uid();
+  v_ok boolean;
+  v_inv gridocs.invitations%rowtype;
+  v_exists boolean;
+  v_role uuid;
+begin
+  if v_uid is null then raise exception 'Unauthenticated'; end if;
+
+  v_ok := gridocs.under_rate_limit('join', p_client_ip, v_uid, p_join_limit_ip, p_join_limit_user, p_join_window);
+  insert into gridocs.invite_attempts(invite_code, actor_user_id, actor_ip, action) values (upper(p_code), v_uid, p_client_ip, 'join');
+  if not v_ok then raise exception 'Too many join attempts. Please try again later.'; end if;
+
+  select * into v_inv from gridocs.invitations where code = upper(p_code) for update;
+  if not found then raise exception 'Invalid invitation code'; end if;
+  if v_inv.is_disabled or (v_inv.expires_at is not null and v_inv.expires_at < now()) then
+    raise exception 'Invitation expired or disabled';
+  end if;
+  if v_inv.used_count >= v_inv.max_uses then
+    raise exception 'Invitation has no remaining uses';
+  end if;
+
+  v_role := coalesce(v_inv.role_in_company, gridocs.get_role_in_company_id_by_name(p_fallback_role_name));
+
+  select exists(
+    select 1 from gridocs.users_companies
+     where user_id = v_uid and company_id = v_inv.company_id and end_date is null
+  ) into v_exists;
+
+  if not v_exists then
+    insert into gridocs.users_companies (id, user_id, company_id, role_in_company, start_date)
+      values (gen_random_uuid(), v_uid, v_inv.company_id, v_role, current_date);
+    update gridocs.invitations
+       set used_count = used_count + 1,
+           is_disabled = (used_count + 1) >= max_uses
+     where id = v_inv.id;
+    return query select v_inv.company_id, true, v_role;
+  else
+    return query select v_inv.company_id, false, v_role;
+  end if;
+end;
+$$;
+
+-- Revoke invitation (disable) — Admin+ of the company (invoker)
+create or replace function gridocs.revoke_invitation(p_invitation_id uuid)
+returns gridocs.invitations
+language sql security invoker set search_path = gridocs, public as $$
+  update gridocs.invitations i
+     set is_disabled = true
+   where i.id = p_invitation_id
+     and (gridocs.is_company_admin(i.company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid()))
+   returning *;
+$$;
+
+-- List invitations for a company (Admin+; invoker; RLS enforces)
+create or replace function gridocs.list_invitations_for_company(p_company_id uuid)
+returns setof gridocs.invitations
+language sql security invoker set search_path = gridocs, public as $$
+  select * from gridocs.invitations where company_id = p_company_id order by created_at desc;
+$$;
+
+-- Status ID by name
 create or replace function gridocs.get_status_id_by_name(p_name text)
-returns uuid
-language sql
-security invoker
-stable
-set search_path = gridocs, public
-as $$
+returns uuid language sql security invoker stable set search_path = gridocs, public as $$
   select s.id from gridocs.statuses s where s.name = p_name limit 1;
 $$;
 
--- Create/Update profile (self) via RPC instead of direct table write
+-- Profile upsert (self)
 create or replace function gridocs.create_or_update_my_profile(
   p_first_name text,
   p_last_name text,
@@ -881,126 +995,66 @@ create or replace function gridocs.create_or_update_my_profile(
   p_signature text default null,
   p_avatar text default null
 ) returns gridocs.profiles
-language plpgsql
-security invoker
-set search_path = gridocs, public
-as $$
-declare
-  v_id uuid := auth.uid();
-  v_existing gridocs.profiles%rowtype;
+language plpgsql security invoker set search_path = gridocs, public as $$
+declare v_id uuid := auth.uid(); v_existing gridocs.profiles%rowtype;
 begin
-  if v_id is null then
-    raise exception 'Unauthenticated';
-  end if;
-
+  if v_id is null then raise exception 'Unauthenticated'; end if;
   select * into v_existing from gridocs.profiles where id = v_id;
-
   if found then
     update gridocs.profiles
-       set first_name   = p_first_name,
-           last_name    = p_last_name,
-           email_address= p_email_address,
-           phone_number = p_phone_number,
-           status_id    = coalesce(p_status_id, status_id),
-           signature    = coalesce(p_signature, signature),
-           avatar       = coalesce(p_avatar, avatar)
-     where id = v_id
-     returning * into v_existing;
+       set first_name=p_first_name,last_name=p_last_name,email_address=p_email_address,phone_number=p_phone_number,
+           status_id=coalesce(p_status_id,status_id),signature=coalesce(p_signature,signature),avatar=coalesce(p_avatar,avatar)
+     where id=v_id returning * into v_existing;
     return v_existing;
   else
-    insert into gridocs.profiles (id, first_name, last_name, email_address, phone_number, status_id, signature, avatar)
-    values (v_id, p_first_name, p_last_name, p_email_address, p_phone_number, p_status_id, p_signature, p_avatar)
+    insert into gridocs.profiles(id,first_name,last_name,email_address,phone_number,status_id,signature,avatar)
+    values (v_id,p_first_name,p_last_name,p_email_address,p_phone_number,p_status_id,p_signature,p_avatar)
     returning * into v_existing;
     return v_existing;
   end if;
 end;
 $$;
 
--- Create company (Admin+ and up)
+-- Create company (Admin+)
 create or replace function gridocs.create_company(p_name text, p_website text default null)
 returns gridocs.companies
-language sql
-security invoker
-stable
-set search_path = gridocs, public
-as $$
+language sql security invoker stable set search_path = gridocs, public as $$
   insert into gridocs.companies (name, website, created_by)
   values (p_name, p_website, auth.uid())
   returning *;
 $$;
 
--- Current license for a user & product_code (NULL expires_at is NOT current)
--- "Current" statuses you accept (tune list if needed)
+-- Current license by user & product code (strict "current")
 create or replace function gridocs.get_current_license_for_user(
-  p_user_id uuid,
-  p_product_code text
+  p_user_id uuid, p_product_code text
 ) returns table(
-  license_id uuid,
-  product_code_id uuid,
-  product_code text,
-  status_id uuid,
-  status_name text,
-  device_info text,
-  signature text,
-  issued_at timestamptz,
-  expires_at timestamptz,
-  created_at timestamptz,
-  notes text
+  license_id uuid, product_code_id uuid, product_code text, status_id uuid, status_name text,
+  device_info text, signature text, issued_at timestamptz, expires_at timestamptz, created_at timestamptz, notes text
 )
-language sql
-security invoker
-stable
-set search_path = gridocs, public
-as $$
-  select
-    l.id,
-    l.product_code_id,
-    pc.code as product_code,
-    l.status_id,
-    s.name as status_name,
-    l.device_info,
-    l.signature,
-    l.issued_at,
-    l.expires_at,
-    l.created_at,
-    l.notes
+language sql security invoker stable set search_path = gridocs, public as $$
+  select l.id, l.product_code_id, pc.code, l.status_id, s.name,
+         l.device_info, l.signature, l.issued_at, l.expires_at, l.created_at, l.notes
   from gridocs.licenses l
   join gridocs.product_codes pc on pc.id = l.product_code_id
   left join gridocs.statuses s on s.id = l.status_id
   where l.user_id = p_user_id
     and pc.code = p_product_code
-    and l.expires_at >= now()                     -- NULL is NOT current
+    and l.expires_at >= now()
     and coalesce(s.name,'') = any(array['Active','Issued','Renewed','Paid','Registered'])
   order by l.expires_at desc, l.issued_at desc nulls last
   limit 1;
 $$;
 
--- One current license per product (handy list)
+-- One current license per product (list)
 create or replace function gridocs.get_current_licenses_for_user(
   p_user_id uuid
 ) returns table(
-  product_code text,
-  license_id uuid,
-  status_name text,
-  issued_at timestamptz,
-  expires_at timestamptz
+  product_code text, license_id uuid, status_name text, issued_at timestamptz, expires_at timestamptz
 )
-language sql
-security invoker
-stable
-set search_path = gridocs, public
-as $$
+language sql security invoker stable set search_path = gridocs, public as $$
   with ranked as (
-    select
-      pc.code as product_code,
-      l.id as license_id,
-      s.name as status_name,
-      l.issued_at,
-      l.expires_at,
-      row_number() over (
-        partition by pc.code
-        order by l.expires_at desc, l.issued_at desc nulls last
-      ) as rn
+    select pc.code, l.id, s.name, l.issued_at, l.expires_at,
+           row_number() over (partition by pc.code order by l.expires_at desc, l.issued_at desc nulls last) rn
     from gridocs.licenses l
     join gridocs.product_codes pc on pc.id = l.product_code_id
     left join gridocs.statuses s on s.id = l.status_id
@@ -1008,76 +1062,145 @@ as $$
       and l.expires_at >= now()
       and coalesce(s.name,'') = any(array['Active','Issued','Renewed','Paid','Registered'])
   )
-  select product_code, license_id, status_name, issued_at, expires_at
-  from ranked
-  where rn = 1;
+  select code, id, name, issued_at, expires_at from ranked where rn = 1;
 $$;
+
+-- Promote to Admin (company Admin OR global Developer/Super can promote)
+create or replace function gridocs.promote_user_to_company_admin(
+  p_company_id uuid, p_user_id uuid, p_admin_role_name text default 'Admin'
+) returns table(user_id uuid, company_id uuid, role_in_company uuid)
+language plpgsql security invoker set search_path = gridocs, public as $$
+declare v_admin_role uuid; v_exists boolean;
+begin
+  if not (gridocs.is_company_admin(p_company_id, auth.uid()) or gridocs.is_global_developer(auth.uid()) or gridocs.is_global_super(auth.uid())) then
+    raise exception 'Not authorized to promote to Admin for this company';
+  end if;
+
+  select gridocs.get_role_in_company_id_by_name(p_admin_role_name) into v_admin_role;
+  if v_admin_role is null then
+    raise exception 'Admin role "%" not found in role_in_company', p_admin_role_name;
+  end if;
+
+  select exists(
+    select 1 from gridocs.users_companies where user_id = p_user_id and company_id = p_company_id and end_date is null
+  ) into v_exists;
+
+  if v_exists then
+    update gridocs.users_companies
+       set role_in_company = v_admin_role
+     where user_id = p_user_id and company_id = p_company_id and end_date is null;
+  else
+    insert into gridocs.users_companies (id, user_id, company_id, role_in_company, start_date)
+      values (gen_random_uuid(), p_user_id, p_company_id, v_admin_role, current_date);
+  end if;
+
+  return query select p_user_id, p_company_id, v_admin_role;
+end;
+$$;
+
+-- =========================================================
+-- SECURITY: GRANTS FOR SUPABASE ROLES
+-- =========================================================
+-- By default Supabase exposes functions to anon/authenticated. Lock down Definer funcs carefully.
+
+-- Revoke from PUBLIC, then grant as needed:
+revoke all on function gridocs.validate_invitation(text, inet, int, int, interval) from public;
+revoke all on function gridocs.accept_invitation_and_join_company(text, inet, int, int, interval, text) from public;
+
+grant execute on function
+  gridocs.validate_invitation(text, inet, int, int, interval),
+  gridocs.accept_invitation_and_join_company(text, inet, int, int, interval, text)
+to anon, authenticated, service_role;
+
+-- Grant execute for invoker functions to authenticated (and service_role)
+grant execute on function
+  gridocs.create_invitation(uuid, uuid, int, timestamptz),
+  gridocs.list_invitations_for_company(uuid),
+  gridocs.revoke_invitation(uuid),
+  gridocs.create_or_update_my_profile(text, text, text, text, uuid, text, text),
+  gridocs.create_company(text, text),
+  gridocs.get_status_id_by_name(text),
+  gridocs.get_current_license_for_user(uuid, text),
+  gridocs.get_current_licenses_for_user(uuid),
+  gridocs.promote_user_to_company_admin(uuid, uuid, text),
+  gridocs.ensure_membership(uuid, uuid, uuid),
+  gridocs.end_membership(uuid, uuid, date),
+  gridocs.get_role_in_company_id_by_name(text),
+  gridocs.default_member_role()
+to authenticated, service_role;
+
+-- Optionally allow anon for "validate_invitation" only (already granted above).
 ```
 
 ---
 
-## 4) PostgreSQL `infinity` for timestamps (when to use)
+## 4) PostgreSQL `'infinity'` for timestamps
 
-PostgreSQL supports special timestamp values:
-
-- **`'infinity'::timestamptz`** – greater than any finite timestamp.
-- **`'-infinity'::timestamptz`** – less than any finite timestamp.
-
-Properties:
-
-- Comparisons behave as you’d expect:
-  - `'infinity' >= now()` → **true**
-  - `'infinity' > '2999-01-01'` → **true**
-
-- Indexing: fully supported; B-tree indexes handle infinity correctly.
-- Use case here: to represent “no expiration,” set `expires_at = 'infinity'`. Our
-  “current” check (`expires_at >= now()`) naturally treats it as current.
-
-**Why not `NULL`?**
-
-- `NULL` means “unknown/missing,” not “never expires.”
-- `NULL >= now()` is **NULL** (treated as false in `WHERE`), so it won’t count as
-  current, which aligns with your requirement.
-
-> Migration tip: if you have rows that were intended as “no expiration” but currently
-> `NULL`,
-> `UPDATE licenses SET expires_at = 'infinity' WHERE expires_at IS NULL AND <intended-no-expiration>;`
+- `'infinity'::timestamptz` is greater than any finite timestamp.
+- Works with B-tree indexes and comparisons.
+- Use it for “no expiration”; we **never** treat `NULL` as non-expiring.
+- Migration tip:
+  `update gridocs.licenses set expires_at = 'infinity' where expires_at is null and <condition>;`
 
 ---
 
-## 5) Edge Function example (using `supabase.rpc` only)
+## 5) Seed snippets (optional but helpful)
 
-Below is your original example, adapted to **exclusively** use RPCs we added. It signs
-up a user, fetches `Pending` status id via RPC, creates/updates profile via RPC, and
-creates a company via RPC (requires Admin+ token; if you want onboarding for non-admins,
-you’d typically do this through a **separate privileged** workflow or an approval
-queue).
+```sql
+-- Role in company labels
+insert into gridocs.role_in_company(id, name, description)
+select gen_random_uuid(), v.name, v.desc
+from (values
+  ('Member','Default member'),
+  ('Admin','Company administrator')
+) as v(name, desc)
+where not exists (select 1 from gridocs.role_in_company ric where ric.name = v.name);
+
+-- Statuses (for licenses/workflows; tune as needed)
+insert into gridocs.statuses(id, name, description)
+select gen_random_uuid(), v.name, v.desc
+from (values
+  ('Pending','Awaiting approval'),
+  ('Active','Active/valid'),
+  ('Issued','Issued'),
+  ('Renewed','Renewed'),
+  ('Paid','Paid'),
+  ('Registered','Registered')
+) as v(name, desc)
+where not exists (select 1 from gridocs.statuses s where s.name = v.name);
+```
+
+---
+
+## 6) Edge Functions (ready-to-deploy; RPC-only)
+
+> All functions assume the following helpers:
 
 ```ts
 import { createClient } from 'jsr:@supabase/supabase-js';
 
-/**
- * Creates a standardized JSON response.
- */
-const jsonResponse = (body, status = 200) => {
-  return new Response(JSON.stringify(body), {
+const schema = 'gridocs';
+const jsonResponse = (body: any, status = 200) =>
+  new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
-};
 
-const schema = 'gridocs';
-const pendingStatus = 'Pending';
-
-const supabase = createClient(
+const supabasePublic = createClient(
   Deno.env.get('SUPABASE_URL'),
   Deno.env.get('PUBLISHABLE_KEY'),
   { db: { schema } },
 );
 
+// If you need privileged flows (e.g., license creation), use service role:
+// const supabaseService = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema } });
+```
+
+### A) `signup_with_invite` — Validate (rate-limited) → SignUp → Profile → Join (rate-limited)
+
+```ts
 Deno.serve(async (req) => {
   if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-
   try {
     const body = await req.json();
     const {
@@ -1085,138 +1208,265 @@ Deno.serve(async (req) => {
       last_name,
       email_address,
       password,
-      company_name,
       phone_number,
-      device_info, // You can store it later as part of license workflows
+      invite_code,
+      captcha_token,
     } = body;
 
-    // 1) Auth sign up
+    // Optional: verify captcha_token here
+
+    const fwd = req.headers.get('x-forwarded-for');
+    const client_ip = (fwd?.split(',')[0] ?? '0.0.0.0').trim();
+
+    // 1) Validate (rate-limited)
+    const { data: valid, error: valErr } = await supabasePublic.rpc(
+      'validate_invitation',
+      {
+        p_code: invite_code,
+        p_client_ip: client_ip,
+      },
+    );
+    if (valErr || !valid || valid.length === 0) {
+      return jsonResponse({ error: 'Invalid or unavailable invitation code' }, 400);
+    }
+
+    // 2) Sign up
     const {
       data: { user },
-      error: signUpError,
-    } = await supabase.auth.signUp({
-      email: email_address,
-      password,
+      error: signErr,
+    } = await supabasePublic.auth.signUp({ email: email_address, password });
+    if (signErr || !user)
+      return jsonResponse({ error: 'Could not sign up the user' }, 401);
+
+    // 3) Status 'Pending'
+    const { data: statusId } = await supabasePublic.rpc('get_status_id_by_name', {
+      p_name: 'Pending',
     });
-    if (signUpError) {
-      console.dir(signUpError);
-      return jsonResponse({ error: 'Internal Error: Could not sign up the user' }, 401);
-    }
 
-    // 2) Resolve 'Pending' status id via RPC
-    const { data: statusId, error: statusError } = await supabase.rpc(
-      'get_status_id_by_name',
+    // 4) Upsert profile
+    const { error: profErr } = await supabasePublic.rpc('create_or_update_my_profile', {
+      p_first_name: first_name,
+      p_last_name: last_name,
+      p_email_address: email_address,
+      p_phone_number: phone_number,
+      p_status_id: statusId,
+    });
+    if (profErr) return jsonResponse({ error: 'Could not upsert profile' }, 500);
+
+    // 5) Accept & join (rate-limited)
+    const { data: joined, error: joinErr } = await supabasePublic.rpc(
+      'accept_invitation_and_join_company',
       {
-        p_name: pendingStatus,
+        p_code: invite_code,
+        p_client_ip: client_ip,
       },
     );
-    if (statusError || !statusId) {
-      console.dir(statusError);
-      return jsonResponse(
-        { error: 'Internal Error: Could not retrieve the status id' },
-        401,
-      );
-    }
+    if (joinErr || !joined || joined.length === 0)
+      return jsonResponse({ error: 'Could not accept invitation' }, 500);
 
-    // 3) Create/Update profile (self) via RPC
-    const { data: profile, error: profileErr } = await supabase.rpc(
-      'create_or_update_my_profile',
-      {
-        p_first_name: first_name,
-        p_last_name: last_name,
-        p_email_address: email_address,
-        p_phone_number: phone_number,
-        p_status_id: statusId,
-        // p_signature / p_avatar optional
-      },
-    );
-    if (profileErr) {
-      console.dir(profileErr);
-      return jsonResponse({ error: 'Internal Error: Could not upsert profile' }, 401);
-    }
-
-    // 4) Create company (requires Admin+ token)
-    if (company_name) {
-      const { data: company, error: companyErr } = await supabase.rpc(
-        'create_company',
-        {
-          p_name: company_name,
-        },
-      );
-      if (companyErr) {
-        // Not fatal for user creation; depends on your UX
-        console.dir(companyErr);
-        return jsonResponse(
-          { error: 'Could not create company (Admin+ required)' },
-          403,
-        );
-      }
-    }
-
-    // 5) Success
     return jsonResponse({
       success: true,
-      message: 'User created successfully!',
       user: { id: user.id, email_address: user.email },
+      company: {
+        id: joined[0].company_id,
+        joined: joined[0].joined,
+        role_in_company: joined[0].role_in_company,
+      },
     });
   } catch (err) {
-    console.error('[Edge Function] Error: ', err);
-    if (err instanceof SyntaxError) {
-      return jsonResponse({ error: 'Invalid JSON body provided' }, 400);
-    }
-    return jsonResponse(
-      { error: 'An internal server error occurred', details: err.message },
-      500,
-    );
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
   }
 });
 ```
 
-### Other useful RPC call examples
+### B) `create_invitation` — Company Admin+ (multi/single-use, expiry, optional role)
 
 ```ts
-// Get current license for a given user & product code
-await supabase.rpc('get_current_license_for_user', {
-  p_user_id: someUserId,
-  p_product_code: 'ACME-PRO-001',
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { company_id, role_name, max_uses = 1, expires_at } = await req.json();
+
+    // Optional: resolve role by name
+    let role_id: string | null = null;
+    if (role_name) {
+      const { data } = await supabasePublic.rpc('get_role_in_company_id_by_name', {
+        p_name: role_name,
+      });
+      role_id = data ?? null;
+    }
+
+    const { data: inv, error } = await supabasePublic.rpc('create_invitation', {
+      p_company_id: company_id,
+      p_role_in_company: role_id,
+      p_max_uses: max_uses,
+      p_expires_at: expires_at ?? null,
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ success: true, invitation: inv });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
 });
+```
 
-// Get one current license per product for a user
-await supabase.rpc('get_current_licenses_for_user', { p_user_id: someUserId });
+### C) `list_invitations` — Company Admin+
 
-// Resolve a status id by name (e.g., 'Active', 'Pending', etc.)
-await supabase.rpc('get_status_id_by_name', { p_name: 'Active' });
-
-// Upsert my profile (self-service, includes signature)
-await supabase.rpc('create_or_update_my_profile', {
-  p_first_name: 'Ada',
-  p_last_name: 'Lovelace',
-  p_email_address: 'ada@example.com',
-  p_phone_number: '+1-555-555-1234',
-  p_signature: 'Ada L.',
+```ts
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { company_id } = await req.json();
+    const { data, error } = await supabasePublic.rpc('list_invitations_for_company', {
+      p_company_id: company_id,
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ invitations: data });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
 });
+```
 
-// Create a company (Admin / Developer / Super)
-await supabase.rpc('create_company', { p_name: 'Acme Inc.' });
+### D) `revoke_invitation` — Company Admin+
+
+```ts
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { invitation_id } = await req.json();
+    const { data, error } = await supabasePublic.rpc('revoke_invitation', {
+      p_invitation_id: invitation_id,
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ revoked: data });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
+});
+```
+
+### E) `promote_to_admin` — **Company Admin OR Developer/Super** (promote within company)
+
+```ts
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { company_id, target_user_id } = await req.json();
+    const { data, error } = await supabasePublic.rpc('promote_user_to_company_admin', {
+      p_company_id: company_id,
+      p_user_id: target_user_id,
+      p_admin_role_name: 'Admin',
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ success: true, promotion: data });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
+});
+```
+
+### F) `get_current_license` — public (subject to RLS)
+
+```ts
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { user_id, product_code } = await req.json();
+    const { data, error } = await supabasePublic.rpc('get_current_license_for_user', {
+      p_user_id: user_id,
+      p_product_code: product_code,
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ license: data && data[0] ? data[0] : null });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
+});
+```
+
+### G) `set_my_profile` — self-service profile upsert
+
+```ts
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { first_name, last_name, email_address, phone_number, signature, avatar } =
+      await req.json();
+    const { data, error } = await supabasePublic.rpc('create_or_update_my_profile', {
+      p_first_name: first_name,
+      p_last_name: last_name,
+      p_email_address: email_address,
+      p_phone_number: phone_number,
+      p_signature: signature ?? null,
+      p_avatar: avatar ?? null,
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ profile: data });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
+});
+```
+
+### H) (Bonus) `leave_company` — end membership (self or Admin+)
+
+> You may want a policy-enhanced RPC that allows a user to leave their company or Admin
+> to end someone’s membership. RLS already allows Admin+ updates; we wrap with RPC for
+> consistency.
+
+```ts
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  try {
+    const { company_id, user_id } = await req.json();
+    const { data, error } = await supabasePublic.rpc('end_membership', {
+      p_user_id: user_id,
+      p_company_id: company_id,
+    });
+    if (error) return jsonResponse({ error: error.message }, 403);
+    return jsonResponse({ ended: data && data[0] ? data[0] : null });
+  } catch (err) {
+    return jsonResponse({ error: 'Internal server error', details: err.message }, 500);
+  }
+});
 ```
 
 ---
 
-## 6) Notes for architects
+## 7) Operational guidance
 
-- **Privilege boundaries** are enforced at the database level via RLS and **role
-  thresholds** (Admin/Developer/Super). Switching an org to stricter/looser governance
-  is a single change to threshold functions.
-- **Licenses are sensitive**: only **Developer+** may mutate. Connect UI “request” flows
-  to **privileged Edge Functions** or ticketing; those privileged paths then call
-  license-write RPCs using a service role key.
-- **Infinity** for “no expiration” keeps the logic monotonic and index-friendly. Avoid
-  `NULL` for “no expiration.”
-- **RPC-first app**: prefer `supabase.rpc(...)` wrappers over direct `from(...)`—it
-  centralizes logic, prevents schema leaks, and eases future migrations.
+- **Secrets**: never expose `SUPABASE_SERVICE_ROLE_KEY` to clients. Use only in
+  server-side code when absolutely needed.
+- **IP address**: extract via `x-forwarded-for` in Edge Functions; pass into RPCs as
+  `inet`.
+- **CAPTCHA**: verify on server (Edge Function) before calling invitation RPCs to reduce
+  abuse.
+- **Testing**:
+  - Validate → Join limits (hit windows and verify errors).
+  - Expiry and max_uses behavior.
+  - Promotion authorization (Admin within company vs. Developer/Super globally).
+  - RLS: try to read/write invitations as non-admin to confirm denial.
+
+- **Rollback**: all functions are idempotent; to revert invitations, drop the
+  `invitations`/`invite_attempts` tables and the dependent RPCs/policies. Keep a
+  snapshot of your schema_migrations.
+- **Monitoring**: consider adding an `audit_log` table (trigger-based) to capture:
+  invitation create/revoke, validate/join success/failure, promotions.
 
 ---
 
-If you want me to plug in your exact **role names ↔ level numbers** (e.g.,
-Administrator=50, Developer=70, Super=100) or to add **grant helpers** (e.g., “promote
-user to Developer for company X”), say the word and I’ll wire those with safe checks.
+## 8) Why this design works
+
+- **Least privilege**: Definer RPCs are narrow and audited (attempts logged,
+  rate-limited).
+- **RLS-first**: All broad data paths remain protected; public flows go through
+  controlled gates.
+- **Composable**: Extend invitations with email domain constraints, per-role defaults,
+  or SSO flows without changing the security envelope.
+- **Maintainable**: Threshold functions make governance shifts easy (change once, done).
+
+---
+
+If you want me to add an **audit trail** (table + triggers + views) or **email dispatch
+hooks** for invites/promotions, I can append that next.
