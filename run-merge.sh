@@ -30,11 +30,5 @@ node scripts/md-format-sql-fences.js "${MERGED_FILE}"
 node scripts/md-dedupe-fences.js "${MERGED_FILE}"
 npx markdownlint -q "${MERGED_FILE}" # <-- Fixed
 
-# --- Step 5: Finalize the Merge Commit ---
 echo ""
-echo "--- Step 5: Finalizing the merge ---"
-git add "${MERGED_FILE}"
-git commit --no-edit
-
-echo ""
-echo "✅ Merge and cleanup complete."
+echo "✅ Merged file created successfully!"
