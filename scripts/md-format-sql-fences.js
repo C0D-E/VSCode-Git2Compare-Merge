@@ -7,18 +7,14 @@ import { resolve } from 'path';
 import { glob } from 'glob';
 import { format as sqlFormat } from 'sql-formatter';
 
-const SQL_TAGS = [
-'sql',
-'postgres',
-'postgresql',
-'psql'
-];
+const SQL_TAGS = ['sql', 'postgres', 'postgresql', 'psql'];
 const FENCE_RE = /```([a-zA-Z0-9_-]+)[ \t]*\r?\n([\s\S]*?)\r?\n```/g;
 
 const CHECK_MODE = process.argv.includes('--check');
 
 (async () => {
-  const files = await glob('**/*.md', { ignore: ['**/node_modules/**'] });
+  const fileArgs = process.argv.slice(2);
+  const files = fileArgs.length > 0 ? fileArgs : await glob('files/**/*.md');
 
   let changedAny = false;
 

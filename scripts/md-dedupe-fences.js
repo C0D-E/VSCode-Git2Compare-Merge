@@ -10,12 +10,7 @@ import { glob } from 'glob';
 import { format as sqlFormat } from 'sql-formatter';
 import { format } from 'prettier';
 
-const SQL_TAGS = [
-'sql',
-'postgres',
-'postgresql',
-'psql'
-];
+const SQL_TAGS = ['sql', 'postgres', 'postgresql', 'psql'];
 const JS_TAGS = ['js', 'javascript'];
 
 // Captures: 1) language, 2) body (greedy, multiline)
@@ -44,7 +39,8 @@ function canon(lang, body) {
 }
 
 (async () => {
-  const files = await glob('**/*.md', { ignore: ['**/node_modules/**'] });
+  const fileArgs = process.argv.slice(2);
+  const files = fileArgs.length > 0 ? fileArgs : await glob('files/**/*.md');
 
   let anyChangedGlobal = false;
 
