@@ -1,0 +1,8 @@
+{
+  "git.mergeEditor": true,
+  "diffEditor.renderSideBySide": true,
+  "editor.formatOnSave": true,
+  "[markdown]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[javascript]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[sql]": { "editor.defaultFormatter": "adpyke.vscode-sql-formatter" }
+}

@@ -1,0 +1,7 @@
+# Safe union for prose
+*.md   merge=union
+*.txt  merge=union
+
+# Code & SQL: resolve with merge editor/scripts (no blind union)
+*.js   merge=text
+*.sql  merge=text

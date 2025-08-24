@@ -1,0 +1,9 @@
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Editor & OS files
+.DS_Store
+
+# This setup script
+init-repo.sh

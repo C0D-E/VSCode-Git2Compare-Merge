@@ -1,0 +1,26 @@
+{
+  "name": "compare-files",
+  "type": "module",
+  "scripts": {
+    "prepare": "simple-git-hooks",
+    "fmt": "prettier --write \"**/*.md\" && node scripts/md-format-sql-fences.js && node scripts/md-dedupe-fences.js && prettier --write . && markdownlint -q \"**/*.md\" || true",
+    "fmt:check": "prettier --check \"**/*.md\" && node scripts/md-format-sql-fences.js --check && node scripts/md-dedupe-fences.js --check && markdownlint \"**/*.md\"",
+    "lint": "eslint . --fix"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npm run fmt && npm run lint"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.34.0",
+    "eslint": "^9.34.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-unused-imports": "^4.2.0",
+    "glob": "^11.0.3",
+    "globals": "^16.3.0",
+    "markdownlint-cli": "^0.45.0",
+    "prettier": "^3.6.2",
+    "simple-git-hooks": "^2.13.1",
+    "sql-formatter": "^15.6.6"
+  }
+}
