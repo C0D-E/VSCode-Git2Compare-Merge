@@ -1,6 +1,6 @@
 #!/bin/bash
 
-git switch -c main
+git switch main
 
 echo ""
 echo "--- Step 1: Creating the base file with v1 content ---"
